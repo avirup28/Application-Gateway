@@ -1,0 +1,25 @@
+<# pull  BackendAddresses  #>
+
+$Apgs = Get-AzureRmApplicationGateway | select Name,ResourceGroupName
+foreach ($Apg in $Apgs) {
+$Name = $Apg.Name
+
+Write-Output "$Name"
+$Data = Get-AzureRmApplicationGateway -ResourceGroupName $Apg.resourcegroupname -Name $Apg.name | select BackendAddressPoolsText
+$Req = $Data.BackendAddressPoolsText
+$converted=$Req | ConvertFrom-Json
+$converted | fl name, BackendAddresses 
+}  
+
+<# pull  hostname  #>
+
+$Apgs = Get-AzureRmApplicationGateway | select Name,ResourceGroupName
+foreach ($Apg in $Apgs) {
+$Name = $Apg.Name
+ 
+Write-Output "$Name"
+$Data = Get-AzureRmApplicationGateway -ResourceGroupName $Apg.resourcegroupname -Name $Apg.name | select BackendHttpSettingsCollectionText
+$Req = $Data.BackendHttpSettingsCollectionText 
+$converted=$Req | ConvertFrom-Json
+$converted | fl hostname
+}  
