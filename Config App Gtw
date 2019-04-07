@@ -9,9 +9,10 @@ Param
     [Parameter(Mandatory)][String]$CustomDomain,
     [Parameter(Mandatory)][String]$KeyVaultName,
     [Parameter(Mandatory)][String]$CertificateName,
-    [Parameter(Mandatory)][String]$ListenerType
+    [Parameter(Mandatory)][ValidateSet('all','http','https')][String]$ListenerType
 )
 
+#Setting CloudCert to "NO"
 $useCloudCert = 'no'
 
 #Setting backend pool name
