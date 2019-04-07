@@ -1,0 +1,256 @@
+Param
+(
+    # ## General
+    [Parameter(Mandatory)][String]$appGwName,
+    [Parameter(Mandatory)][String]$appGwResourceGroupName,
+    ## App Specific
+    [Parameter(Mandatory)][ValidateSet('add','remove')][String]$Action,
+    [Parameter(Mandatory)][String]$WebappName,
+    [Parameter(Mandatory)][String]$CustomDomain,
+    [Parameter(Mandatory)][String]$KeyVaultName,
+    [Parameter(Mandatory)][String]$CertificateName,
+    [Parameter(Mandatory)][String]$ListenerType
+)
+
+$useCloudCert = 'no'
+
+#Setting backend pool name
+$BackendPoolName = "$WebAppName"+"-pool-01"
+
+#Setting backend pool fqdn
+$BackendPoolIP = "$WebAppName"+".azurewebsites.net"
+
+#Setting http setting name
+$httpsetting = "$CustomDomain"+"-http-settings-1"
+$BackendHttpSettingsName = $httpsetting.Replace(".","-")
+
+#Setting http listener name
+$httplistener = "$CustomDomain"+"-http-listener-1"
+$HttpListenerName = $httplistener.Replace(".","-")
+
+#Setting http lsitener host name
+$HttpListenerHostName = $CustomDomain
+
+#Setting rule name
+$rulename = "$CustomDomain"+"-rule-1"
+$Rulename = $rulename.Replace(".","-")
+
+#Setting health probe name
+$healthprobe = "$CustomDomain"+"-health-1"
+$HealthProbeName = $healthprobe.Replace(".","-")
+
+#Setting certificate password name
+$CertficatePasswordName = "$CertificateName"+"-password"
+
+#Setting certificate app name
+$CertAppName = "$CertificateName"+"-app-1"
+
+$BackendHttpSettingsNameS = $BackendHttpSettingsName + "S"
+$HttpListenerNameS        = $HttpListenerName + "S"
+$RulenameS                = $Rulename + "S"
+$HealthProbeNameS         = $HealthProbeName + "S"
+$appGatewayFrontendPortS  = "appGatewayFrontendPort"+"S"
+$HttpListenerHostNameS    = $HttpListenerHostName + "S"
+
+if($Action -eq "add") {
+
+$gw = Get-AzApplicationGateway -Name $appGwName -ResourceGroupName $appGwResourceGroupName
+
+
+function ConfigureHTTPBackendPool {
+    
+    ## 1. Configure HTTP Listener
+    ## The ARM template is expected to have created the Frontend IP and Port(80)
+    ## 1.1 Get App Gateway Frontend IP
+    $fipconfigx = Get-AzApplicationGatewayFrontendIPConfig -ApplicationGateway $gw | Where-Object {$_.PublicIPAddress -ne $null}
+
+    ## 1.2 Get App Gateway Fronend HTTP Port
+    $fpx = Get-AzApplicationGatewayFrontendPort -ApplicationGateway $gw | Where-Object {$_.Port -eq '80'}
+
+    ## 1.3 Add App Gateway Backend Pool
+    $pool = Get-AzApplicationGatewayBackendAddressPool -Name $BackendPoolName -ApplicationGateway $gw -ErrorAction SilentlyContinue
+    if( $pool -eq $Null ) {
+          Add-AzApplicationGatewayBackendAddressPool -ApplicationGateway $gw -Name $BackendPoolName -BackendFqdns $BackendPoolIP
+          $pool = Get-AzApplicationGatewayBackendAddressPool -Name $BackendPoolName -ApplicationGateway $gw}
+    else {$pool = Get-AzApplicationGatewayBackendAddressPool -Name $BackendPoolName -ApplicationGateway $gw -ErrorAction SilentlyContinue}
+
+    ## 1.4 Add App Gateway Backend HTTP Settings
+    Add-AzApplicationGatewayBackendHttpSettings -ApplicationGateway $gw -Name $BackendHttpSettingsName -Port 80 -Protocol Http -CookieBasedAffinity Disabled
+
+    ## 1.5 Add App Gateway Backend HTTP Listener
+    Add-AzApplicationGatewayHttpListener -ApplicationGateway $gw -Name $HttpListenerName -Protocol Http -FrontendIPConfiguration $fipconfigx -FrontendPort $fpx -Hostname $HttpListenerHostName
+
+    ## 1.6 Add the request routing rule
+    $poolSetting  = Get-AzApplicationGatewayBackendHttpSettings -Name $BackendHttpSettingsName -ApplicationGateway $gw
+    $listener     = Get-AzApplicationGatewayHttpListener        -Name $HttpListenerName        -ApplicationGateway $gw
+    $listenerS    = Get-AzApplicationGatewayHttpListener        -Name $HttpListenerNameS       -ApplicationGateway $gw
+    $RedirectName = $Rulename
+
+    Add-AzApplicationGatewayRedirectConfiguration -ApplicationGateway $gw -RedirectType Permanent -Name $RedirectName -TargetListener $listenerS -IncludePath $true -IncludeQueryString $true
+    $redirectConfig = Get-AzApplicationGatewayRedirectConfiguration -ApplicationGateway $gw -Name $RedirectName
+    Add-AzApplicationGatewayRequestRoutingRule -ApplicationGateway $gw -Name $Rulename -RuleType Basic -HttpListener $listener -RedirectConfiguration $redirectConfig
+
+    ## 1.7 Add Health Probe
+    ## 1.7.1 Define the status codes to match for the probe
+    ## HTTP error code 401 - Enabling authentication and authorization in web app gives http 401 during health probe
+    $match=New-AzApplicationGatewayProbeHealthResponseMatch -StatusCode "200-399","401"
+
+    #1.7.2 Add a new probe to the application gateway
+    Add-AzApplicationGatewayProbeConfig -name $HealthProbeName -ApplicationGateway $gw -Interval 30 -Path / -Protocol Http -Timeout 120 -UnhealthyThreshold 3 -HostName $BackendPoolIP
+
+    # Retrieve the newly added probe
+    $probe = Get-AzApplicationGatewayProbeConfig -name $HealthProbeName -ApplicationGateway $gw
+
+    #1.7.3 Configure a backend http settings 
+    Set-AzApplicationGatewayBackendHttpSettings -Name $BackendHttpSettingsName -ApplicationGateway $gw -HostName $HttpListenerHostName -Port 80 -Protocol Http -CookieBasedAffinity Disabled -RequestTimeout 30 -Probe $probe
+
+}
+
+function ConfigureHTTPSBackendPool {
+
+    Add-CertificateToApplicationGateway
+    $cert = Get-AzApplicationGatewaySslCertificate -ApplicationGateway $gw -Name $CertAppName
+
+    ## 1. Configure HTTP Listener
+    ## The ARM template is expected to have created the Frontend IP and Port(80)
+    ## 1.1 Get App Gateway Frontend IP
+    $fipconfigxS = Get-AzApplicationGatewayFrontendIPConfig -ApplicationGateway $gw | Where-Object {$_.PublicIPAddress -ne $null}
+
+    ## 1.2 Get App Gateway Fronend HTTPS Port
+    $fpxS = Get-AzApplicationGatewayFrontendPort -ApplicationGateway $gw -ErrorAction SilentlyContinue | Where-Object {$_.Port -eq '443'}
+    if($fpxS -eq $Null) {Add-AzApplicationGatewayFrontendPort -ApplicationGateway $gw -Name $appGatewayFrontendPortS -Port 443}
+
+    ## 1.3 Add App Gateway Backend Pool
+    $pool = Get-AzApplicationGatewayBackendAddressPool -Name $BackendPoolName -ApplicationGateway $gw -ErrorAction SilentlyContinue
+    if( $pool -eq $Null ) {
+          Add-AzApplicationGatewayBackendAddressPool -ApplicationGateway $gw -Name $BackendPoolName -BackendFqdns $BackendPoolIP
+          $pool = Get-AzApplicationGatewayBackendAddressPool -Name $BackendPoolName -ApplicationGateway $gw}
+    else {$pool = Get-AzApplicationGatewayBackendAddressPool -Name $BackendPoolName -ApplicationGateway $gw -ErrorAction SilentlyContinue}
+
+    ## 1.4 Add App Gateway Backend HTTP Settings
+    Add-AzApplicationGatewayBackendHttpSettings -ApplicationGateway $gw -Name $BackendHttpSettingsNameS -Port 443 -Protocol Https -CookieBasedAffinity Disabled
+
+    ## 1.5 Add App Gateway Backend HTTPS Listener
+    Add-AzApplicationGatewayHttpListener -ApplicationGateway $gw -Name $HttpListenerNameS -Protocol Https -FrontendIPConfiguration $fipconfigxS -FrontendPort $fpxS -SslCertificate $cert -HostName $HttpListenerHostName -RequireServerNameIndication true
+
+    ## 1.6 Add the request routing rule
+    $poolSettingS  = Get-AzApplicationGatewayBackendHttpSettings -Name $BackendHttpSettingsNameS -ApplicationGateway $gw
+    $listenerS = Get-AzApplicationGatewayHttpListener -Name $HttpListenerNameS -ApplicationGateway $gw
+
+    Add-AzApplicationGatewayRequestRoutingRule -ApplicationGateway $gw -Name $RulenameS -RuleType Basic -HttpListener $listenerS -BackendAddressPool $pool -BackendHttpSettings $poolSettingS
+
+    ## 1.7 Add Health Probe
+    ## 1.7.1 Define the status codes to match for the probe
+    ## HTTP error code 401 - Enabling authentication and authorization in web app gives http 401 during health probe
+    $match = New-AzApplicationGatewayProbeHealthResponseMatch -StatusCode "200-399","401"
+
+    #1.7.2 Add a new probe to the application gateway
+    Add-AzApplicationGatewayProbeConfig -name $HealthProbeNameS -ApplicationGateway $gw -Interval 30 -Path / -Protocol Https -Timeout 120 -UnhealthyThreshold 3 -HostName $BackendPoolIP -Match $match
+    
+    # Retrieve the newly added probe
+    $probeS = Get-AzApplicationGatewayProbeConfig -name $HealthProbeNameS -ApplicationGateway $gw
+
+    #1.7.3 Configure a backend http settings 
+    Set-AzApplicationGatewayBackendHttpSettings -Name $BackendHttpSettingsNameS -ApplicationGateway $gw -HostName $HttpListenerHostName -Port 443 -Protocol Https -CookieBasedAffinity Disabled -RequestTimeout 30 -Probe $probeS
+}
+
+function Add-CertificateToApplicationGateway {
+
+    #Application Gateway can be in any region however the certificate key vault is in PG-External-Consumer-NA-01 subscription
+    $cert = Get-AzApplicationGatewaySslCertificate -Name $CertAppName -ApplicationGateway $gw -ErrorAction SilentlyContinue
+
+    if ($cert -eq $Null) {
+
+
+        #Get Certificate
+        $cert = Get-AzureKeyVaultSecret -VaultName $KeyVaultName -Name $CertificateName
+        $certBytes = [System.Convert]::FromBase64String($cert.SecretValueText)
+        $certCollection = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+        $certCollection.Import($certBytes,$null,[System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)
+        $password = (Get-AzureKeyVaultSecret -VaultName $KeyVaultName -Name $CertficatePasswordName).SecretValueText
+        $certAppPass = ConvertTo-SecureString -String $password -AsPlainText -Force
+        $protectedCertificateBytes = $certCollection.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pkcs12, $password)
+        $pfxAppPath = "C:\Temp\" + $CertificateName + "export.pfx"
+        [System.IO.File]::WriteAllBytes($pfxAppPath, $protectedCertificateBytes)
+        
+
+        #Add Certificate
+        Add-AzApplicationGatewaySslCertificate -ApplicationGateway $gw -Name $CertAppName -CertificateFile $pfxAppPath -Password $certAppPass
+    }
+}
+
+#Function to remove certificates from local drive
+function Rm-Certificates {rm C:\temp\*}
+
+#Execution section --------------------------------------
+
+#1 Configure HTTPS settings
+ConfigureHTTPSBackendPool 
+
+#2 Configure HTTP settings
+ConfigureHTTPBackendPool
+
+#3 Remove Certificates
+Rm-Certificates
+
+#4 Commit Changes on APG
+Set-AzApplicationGateway -ApplicationGateway $gw
+
+#Execution end ------------------------------------------
+
+}
+
+if($Action -eq "remove") {
+
+$gw = Get-AzApplicationGateway -Name $appGwName -ResourceGroupName $appGwResourceGroupName
+
+function RemoveHTTPBackendPool {
+    
+    Remove-AzApplicationGatewayBackendHttpSettings -ApplicationGateway $gw -Name $BackendHttpSettingsName
+
+    Remove-AzApplicationGatewayHttpListener -ApplicationGateway $gw -Name $HttpListenerName
+
+    Remove-AzApplicationGatewayRedirectConfiguration -ApplicationGateway $gw -Name $Rulename
+
+    Remove-AzApplicationGatewayRequestRoutingRule -ApplicationGateway $gw -Name $Rulename
+
+    Remove-AzApplicationGatewayProbeConfig -name $HealthProbeName -ApplicationGateway $gw
+
+}
+
+function RemoveHTTPSBackendPool {
+
+    Remove-AzApplicationGatewayBackendHttpSettings -ApplicationGateway $gw -Name $BackendHttpSettingsNameS
+
+    Remove-AzApplicationGatewayHttpListener -ApplicationGateway $gw -Name $HttpListenerNameS
+
+    Remove-AzApplicationGatewayRequestRoutingRule -ApplicationGateway $gw -Name $RulenameS
+
+    Remove-AzApplicationGatewayProbeConfig -name $HealthProbeNameS -ApplicationGateway $gw
+}
+
+function RemoveBackendPool { Remove-AzApplicationGatewayBackendAddressPool -ApplicationGateway $gw -Name $BackendPoolName }
+
+#Function to remove certificates from local drive
+function Rm-Certificates { rm C:\temp\* }
+
+#Execution section --------------------------------------
+
+#1 Configure HTTPS settings
+RemoveHTTPSBackendPool 
+
+#2 Configure HTTP settings
+RemoveHTTPBackendPool
+
+#3 Remove Certificates
+Rm-Certificates
+
+#4 Remove Backend Pool
+RemoveBackendPool
+
+#4 Commit Changes on APG
+Set-AzApplicationGateway -ApplicationGateway $gw
+
+#Execution end ------------------------------------------
+
+}
